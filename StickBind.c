@@ -284,7 +284,7 @@ static void load_config(void) {
     if (!n || n >= 32768) return;
     wchar_t *slash = wcsrchr(dll_path, L'\\');
     if (slash) *(slash + 1) = 0;
-    _snwprintf(ini_path, 32768, L"%StickBind.ini", dll_path);
+    _snwprintf(ini_path, 32768, L"%sStickBind.ini", dll_path);
 
     g_deadzone_pct = (int)GetPrivateProfileIntW(L"Controller", L"Deadzone", 20, ini_path);
     if (g_deadzone_pct < 0) g_deadzone_pct = 0;
