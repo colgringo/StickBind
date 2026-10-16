@@ -78,6 +78,7 @@ typedef enum { CODE_NONE = 0, CODE_KEY, CODE_MOUSE, CODE_WHEEL } CodeKind;
 typedef struct { CodeKind kind; WORD value; } Code;
 typedef struct { Code codes[MAX_CODES]; int count; BOOL was_down; } Binding;
 
+
 int StickBind_Ordinal1(void) { return 1; }
 
 static void binding_clear(Binding *b) { ZeroMemory(b, sizeof(*b)); }
@@ -318,12 +319,13 @@ static void load_layer_buttons(const wchar_t *section, Layer *layer, const wchar
 }
 
 static void load_layer_stick(const wchar_t *section, BOOL *is_mouse, Binding dirs[DIR_COUNT],
-                             const wchar_t *ini, const wchar_t *default_mode) {
+                             const wchar_t *ini, const wchar_t *default_mode, BOOL inherit) {
     wchar_t buf[128];
     GetPrivateProfileStringW(section, L"Mode", default_mode, buf, 128, ini);
     *is_mouse = (_wcsicmp(buf, L"Mouse") == 0);
     for (int i = 0; i < DIR_COUNT; i++) {
-        GetPrivateProfileStringW(section, dir_names[i], L"NONE", buf, 128, ini);
+        GetPrivateProfileStringW(section, dir_names[i], inherit ? L"\x01" : L"NONE", buf, 128, ini);
+        if (inherit && (unsigned char)buf[0] == 0x01) continue;
         dirs[i] = parse_binding(buf);
     }
 }
@@ -383,9 +385,9 @@ static void load_config(void) {
     ZeroMemory(g_layer, sizeof(g_layer));
     load_layer_buttons(L"Buttons", &g_layer[LAYER_BASE], ini_path);
     load_layer_stick(L"LeftStick", &g_layer[LAYER_BASE].left_is_mouse,
-                     g_layer[LAYER_BASE].stick_l, ini_path, L"Keys");
+                     g_layer[LAYER_BASE].stick_l, ini_path, L"Keys", FALSE);
     load_layer_stick(L"RightStick", &g_layer[LAYER_BASE].right_is_mouse,
-                     g_layer[LAYER_BASE].stick_r, ini_path, L"Mouse");
+                     g_layer[LAYER_BASE].stick_r, ini_path, L"Mouse", FALSE);
 
     g_layer[LAYER_MOD1] = g_layer[LAYER_BASE];
     g_layer[LAYER_MOD2] = g_layer[LAYER_BASE];
@@ -411,16 +413,16 @@ static void load_config(void) {
 
     if (stick_section_defined(L"LeftStick_Mod1", ini_path))
         load_layer_stick(L"LeftStick_Mod1", &g_layer[LAYER_MOD1].left_is_mouse,
-                         g_layer[LAYER_MOD1].stick_l, ini_path, left_def);
+                         g_layer[LAYER_MOD1].stick_l, ini_path, left_def, TRUE);
     if (stick_section_defined(L"RightStick_Mod1", ini_path))
         load_layer_stick(L"RightStick_Mod1", &g_layer[LAYER_MOD1].right_is_mouse,
-                         g_layer[LAYER_MOD1].stick_r, ini_path, right_def);
+                         g_layer[LAYER_MOD1].stick_r, ini_path, right_def, TRUE);
     if (stick_section_defined(L"LeftStick_Mod2", ini_path))
         load_layer_stick(L"LeftStick_Mod2", &g_layer[LAYER_MOD2].left_is_mouse,
-                         g_layer[LAYER_MOD2].stick_l, ini_path, left_def);
+                         g_layer[LAYER_MOD2].stick_l, ini_path, left_def, TRUE);
     if (stick_section_defined(L"RightStick_Mod2", ini_path))
         load_layer_stick(L"RightStick_Mod2", &g_layer[LAYER_MOD2].right_is_mouse,
-                         g_layer[LAYER_MOD2].stick_r, ini_path, right_def);
+                         g_layer[LAYER_MOD2].stick_r, ini_path, right_def, TRUE);
 }
 
 static void release_layer(Layer *L) {
@@ -433,6 +435,33 @@ static void release_layer(Layer *L) {
 
 static void release_all_layers(void) {
     for (int i = 0; i < LAYER_COUNT; i++) release_layer(&g_layer[i]);
+}
+
+static BOOL binding_same(const Binding *a, const Binding *b) {
+    if (a->count != b->count) return FALSE;
+    for (int i = 0; i < a->count; i++)
+        if (a->codes[i].kind != b->codes[i].kind || a->codes[i].value != b->codes[i].value)
+            return FALSE;
+    return TRUE;
+}
+
+static void binding_carry(Binding *from, Binding *to, BOOL can_carry) {
+    if (!from->was_down) return;
+    if (can_carry && binding_same(from, to)) {
+        to->was_down = TRUE;
+        from->was_down = FALSE;
+    } else {
+        binding_release(from);
+    }
+}
+
+static void switch_layer(Layer *from, Layer *to) {
+    for (int i = 0; i < IDX_COUNT; i++)
+        binding_carry(&from->btn[i], &to->btn[i], TRUE);
+    for (int i = 0; i < DIR_COUNT; i++) {
+        binding_carry(&from->stick_l[i], &to->stick_l[i], !to->left_is_mouse);
+        binding_carry(&from->stick_r[i], &to->stick_r[i], !to->right_is_mouse);
+    }
 }
 
 static void stick_to_mouse(SHORT sx, SHORT sy, float *acc_x, float *acc_y) {
@@ -571,6 +600,7 @@ static DWORD WINAPI mapper_thread(LPVOID unused) {
         if (pad < 0) {
             release_all_layers();
             g_active_layer = LAYER_BASE;
+            mouse_acc_x = mouse_acc_y = 0.0f;
             Sleep(4);
             continue;
         }
@@ -584,7 +614,7 @@ static DWORD WINAPI mapper_thread(LPVOID unused) {
 
         int layer = pick_layer(btn_down);
         if (layer != g_active_layer) {
-            release_layer(&g_layer[g_active_layer]);
+            switch_layer(&g_layer[g_active_layer], &g_layer[layer]);
             g_active_layer = layer;
         }
 
