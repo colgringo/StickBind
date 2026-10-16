@@ -8,11 +8,39 @@
 
 #define MAX_CODES 8
 
+static BOOL g_use_scancodes = TRUE;
+static BOOL g_require_focus = TRUE;
+static float g_dt_scale = 1.0f;
+
+static BOOL is_extended(WORD vk) {
+    switch (vk) {
+        case VK_RCONTROL: case VK_RMENU: case VK_INSERT: case VK_DELETE:
+        case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
+        case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT:
+        case VK_NUMLOCK: case VK_DIVIDE: case VK_SNAPSHOT:
+        case VK_LWIN: case VK_RWIN: case VK_APPS:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
 static void send_key(WORD vk, BOOL down) {
     if (!vk) return;
     INPUT in; ZeroMemory(&in, sizeof(in));
-    in.type = INPUT_KEYBOARD; in.ki.wVk = vk;
-    if (!down) in.ki.dwFlags = KEYEVENTF_KEYUP;
+    in.type = INPUT_KEYBOARD;
+
+    WORD scan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    BOOL use_scan = g_use_scancodes && scan && vk != VK_PAUSE && vk != VK_NUMLOCK;
+
+    if (use_scan) {
+        in.ki.wScan = scan;
+        in.ki.dwFlags = KEYEVENTF_SCANCODE;
+    } else {
+        in.ki.wVk = vk;
+    }
+    if (is_extended(vk)) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    if (!down) in.ki.dwFlags |= KEYEVENTF_KEYUP;
     SendInput(1, &in, sizeof(in));
 }
 
@@ -54,17 +82,38 @@ int StickBind_Ordinal1(void) { return 1; }
 
 static void binding_clear(Binding *b) { ZeroMemory(b, sizeof(*b)); }
 
+static int g_key_refs[256];
+static int g_mouse_refs[5];
+
+static void key_ref(WORD vk, BOOL down) {
+    if (vk >= 256) { send_key(vk, down); return; }
+    if (down) {
+        if (g_key_refs[vk]++ == 0) send_key(vk, TRUE);
+    } else {
+        if (g_key_refs[vk] > 0 && --g_key_refs[vk] == 0) send_key(vk, FALSE);
+    }
+}
+
+static void mouse_ref(int button, BOOL down) {
+    if (button < 0 || button >= 5) return;
+    if (down) {
+        if (g_mouse_refs[button]++ == 0) send_mouse_button(button, TRUE);
+    } else {
+        if (g_mouse_refs[button] > 0 && --g_mouse_refs[button] == 0) send_mouse_button(button, FALSE);
+    }
+}
+
 static void binding_emit(Binding *b, BOOL down) {
     if (down) {
         for (int i = 0; i < b->count; i++) {
-            if (b->codes[i].kind == CODE_KEY) send_key(b->codes[i].value, TRUE);
+            if (b->codes[i].kind == CODE_KEY) key_ref(b->codes[i].value, TRUE);
             else if (b->codes[i].kind == CODE_WHEEL) send_mouse_wheel(b->codes[i].value == 1);
-            else if (b->codes[i].kind == CODE_MOUSE) send_mouse_button((int)b->codes[i].value, TRUE);
+            else if (b->codes[i].kind == CODE_MOUSE) mouse_ref((int)b->codes[i].value, TRUE);
         }
     } else {
         for (int i = b->count - 1; i >= 0; i--) {
-            if (b->codes[i].kind == CODE_KEY) send_key(b->codes[i].value, FALSE);
-            else if (b->codes[i].kind == CODE_MOUSE) send_mouse_button((int)b->codes[i].value, FALSE);
+            if (b->codes[i].kind == CODE_KEY) key_ref(b->codes[i].value, FALSE);
+            else if (b->codes[i].kind == CODE_MOUSE) mouse_ref((int)b->codes[i].value, FALSE);
         }
     }
 }
@@ -239,13 +288,14 @@ typedef struct {
 } Layer;
 
 static HMODULE g_module;
+static HANDLE g_thread;
 static volatile LONG g_running = 1;
 static Layer g_layer[LAYER_COUNT];
 static int g_mod1_btn = -1, g_mod2_btn = -1;
 static int g_deadzone_pct = 20, g_mouse_sens = 10, g_trigger_threshold = 30;
 static BOOL g_invert_y = FALSE;
 static int g_active_layer = LAYER_BASE;
-static int g_pad_index = -1; /* -1 = unlocked; locks on first activity */
+static int g_pad_index = -1;
 
 static int name_to_btn(const wchar_t *s) {
     if (!s || !s[0] || _wcsicmp(s, L"NONE") == 0 || _wcsicmp(s, L"OFF") == 0) return -1;
@@ -278,13 +328,35 @@ static void load_layer_stick(const wchar_t *section, BOOL *is_mouse, Binding dir
     }
 }
 
+static BOOL stick_section_defined(const wchar_t *section, const wchar_t *ini) {
+    wchar_t buf[128];
+    GetPrivateProfileStringW(section, L"Mode", L"", buf, 128, ini);
+    if (buf[0]) return TRUE;
+    for (int i = 0; i < DIR_COUNT; i++) {
+        GetPrivateProfileStringW(section, dir_names[i], L"", buf, 128, ini);
+        if (buf[0]) return TRUE;
+    }
+    return FALSE;
+}
+
 static void load_config(void) {
-    wchar_t dll_path[32768], ini_path[32768], buf[128];
+    static wchar_t dll_path[32768], ini_path[32768];
+    wchar_t buf[128];
     DWORD n = GetModuleFileNameW(g_module, dll_path, 32768);
     if (!n || n >= 32768) return;
     wchar_t *slash = wcsrchr(dll_path, L'\\');
     if (slash) *(slash + 1) = 0;
-    _snwprintf(ini_path, 32768, L"%sStickBind.ini", dll_path);
+    int path_len = swprintf(
+        ini_path,
+        sizeof(ini_path) / sizeof(ini_path[0]),
+        L"%lsStickBind.ini",
+        dll_path
+    );
+
+    if (path_len < 0 ||
+        (size_t)path_len >= sizeof(ini_path) / sizeof(ini_path[0])) {
+        return;
+    }
 
     g_deadzone_pct = (int)GetPrivateProfileIntW(L"Controller", L"Deadzone", 20, ini_path);
     if (g_deadzone_pct < 0) g_deadzone_pct = 0;
@@ -297,6 +369,11 @@ static void load_config(void) {
     g_trigger_threshold = (int)GetPrivateProfileIntW(L"Controller", L"TriggerThreshold", 30, ini_path);
     if (g_trigger_threshold < 1) g_trigger_threshold = 1;
     if (g_trigger_threshold > 250) g_trigger_threshold = 250;
+
+    GetPrivateProfileStringW(L"Controller", L"ScanCodes", L"true", buf, 128, ini_path);
+    g_use_scancodes = parse_bool(buf);
+    GetPrivateProfileStringW(L"Controller", L"RequireFocus", L"true", buf, 128, ini_path);
+    g_require_focus = parse_bool(buf);
 
     GetPrivateProfileStringW(L"Modifiers", L"Mod1", L"NONE", buf, 128, ini_path);
     g_mod1_btn = name_to_btn(buf);
@@ -313,6 +390,15 @@ static void load_config(void) {
     g_layer[LAYER_MOD1] = g_layer[LAYER_BASE];
     g_layer[LAYER_MOD2] = g_layer[LAYER_BASE];
 
+    if (g_mod1_btn >= 0) {
+        binding_clear(&g_layer[LAYER_MOD1].btn[g_mod1_btn]);
+        binding_clear(&g_layer[LAYER_MOD2].btn[g_mod1_btn]);
+    }
+    if (g_mod2_btn >= 0) {
+        binding_clear(&g_layer[LAYER_MOD1].btn[g_mod2_btn]);
+        binding_clear(&g_layer[LAYER_MOD2].btn[g_mod2_btn]);
+    }
+
     for (int i = 0; i < IDX_COUNT; i++) {
         GetPrivateProfileStringW(L"Buttons_Mod1", btn_names[i], L"\x01", buf, 128, ini_path);
         if ((unsigned char)buf[0] != 0x01) g_layer[LAYER_MOD1].btn[i] = parse_binding(buf);
@@ -320,18 +406,21 @@ static void load_config(void) {
         if ((unsigned char)buf[0] != 0x01) g_layer[LAYER_MOD2].btn[i] = parse_binding(buf);
     }
 
-    GetPrivateProfileStringW(L"LeftStick_Mod1", L"Mode", L"", buf, 128, ini_path);
-    if (buf[0]) load_layer_stick(L"LeftStick_Mod1", &g_layer[LAYER_MOD1].left_is_mouse,
-                                 g_layer[LAYER_MOD1].stick_l, ini_path, L"Keys");
-    GetPrivateProfileStringW(L"RightStick_Mod1", L"Mode", L"", buf, 128, ini_path);
-    if (buf[0]) load_layer_stick(L"RightStick_Mod1", &g_layer[LAYER_MOD1].right_is_mouse,
-                                 g_layer[LAYER_MOD1].stick_r, ini_path, L"Keys");
-    GetPrivateProfileStringW(L"LeftStick_Mod2", L"Mode", L"", buf, 128, ini_path);
-    if (buf[0]) load_layer_stick(L"LeftStick_Mod2", &g_layer[LAYER_MOD2].left_is_mouse,
-                                 g_layer[LAYER_MOD2].stick_l, ini_path, L"Keys");
-    GetPrivateProfileStringW(L"RightStick_Mod2", L"Mode", L"", buf, 128, ini_path);
-    if (buf[0]) load_layer_stick(L"RightStick_Mod2", &g_layer[LAYER_MOD2].right_is_mouse,
-                                 g_layer[LAYER_MOD2].stick_r, ini_path, L"Keys");
+    const wchar_t *left_def  = g_layer[LAYER_BASE].left_is_mouse  ? L"Mouse" : L"Keys";
+    const wchar_t *right_def = g_layer[LAYER_BASE].right_is_mouse ? L"Mouse" : L"Keys";
+
+    if (stick_section_defined(L"LeftStick_Mod1", ini_path))
+        load_layer_stick(L"LeftStick_Mod1", &g_layer[LAYER_MOD1].left_is_mouse,
+                         g_layer[LAYER_MOD1].stick_l, ini_path, left_def);
+    if (stick_section_defined(L"RightStick_Mod1", ini_path))
+        load_layer_stick(L"RightStick_Mod1", &g_layer[LAYER_MOD1].right_is_mouse,
+                         g_layer[LAYER_MOD1].stick_r, ini_path, right_def);
+    if (stick_section_defined(L"LeftStick_Mod2", ini_path))
+        load_layer_stick(L"LeftStick_Mod2", &g_layer[LAYER_MOD2].left_is_mouse,
+                         g_layer[LAYER_MOD2].stick_l, ini_path, left_def);
+    if (stick_section_defined(L"RightStick_Mod2", ini_path))
+        load_layer_stick(L"RightStick_Mod2", &g_layer[LAYER_MOD2].right_is_mouse,
+                         g_layer[LAYER_MOD2].stick_r, ini_path, right_def);
 }
 
 static void release_layer(Layer *L) {
@@ -358,7 +447,7 @@ static void stick_to_mouse(SHORT sx, SHORT sy, float *acc_x, float *acc_y) {
     if (t > 1.0f) t = 1.0f;
     t = t * sqrtf(t);
     fx = (fx / mag) * t; fy = (fy / mag) * t;
-    float scale = (float)g_mouse_sens * 0.25f;
+    float scale = (float)g_mouse_sens * 0.25f * g_dt_scale;
     *acc_x += fx * scale;
     *acc_y += (g_invert_y ? fy : -fy) * scale;
     LONG dx = (LONG)*acc_x, dy = (LONG)*acc_y;
@@ -382,10 +471,18 @@ static int pick_layer(const BOOL btn_down[IDX_COUNT]) {
     return LAYER_BASE;
 }
 
+static BOOL process_has_focus(void) {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return FALSE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
 
 static BOOL state_has_activity(const XINPUT_STATE *s, SHORT dead) {
     if (s->Gamepad.wButtons) return TRUE;
-    if (s->Gamepad.bLeftTrigger >= 30 || s->Gamepad.bRightTrigger >= 30) return TRUE;
+    if (s->Gamepad.bLeftTrigger >= (BYTE)g_trigger_threshold ||
+        s->Gamepad.bRightTrigger >= (BYTE)g_trigger_threshold) return TRUE;
     if (s->Gamepad.sThumbLX > dead || s->Gamepad.sThumbLX < -dead) return TRUE;
     if (s->Gamepad.sThumbLY > dead || s->Gamepad.sThumbLY < -dead) return TRUE;
     if (s->Gamepad.sThumbRX > dead || s->Gamepad.sThumbRX < -dead) return TRUE;
@@ -393,19 +490,29 @@ static BOOL state_has_activity(const XINPUT_STATE *s, SHORT dead) {
     return FALSE;
 }
 
-/* Lock to first pad with real input; keep it until disconnect. */
 static int pick_pad(DWORD (WINAPI *get_state)(DWORD, XINPUT_STATE *),
                     SHORT dead, XINPUT_STATE *out) {
+    static DWORD next_try[4];
+    static BOOL  has_try[4];
+
     if (g_pad_index >= 0) {
         ZeroMemory(out, sizeof(*out));
         if (get_state((DWORD)g_pad_index, out) == ERROR_SUCCESS)
             return g_pad_index;
         g_pad_index = -1;
     }
+
+    DWORD now = GetTickCount();
     for (DWORD i = 0; i < 4; i++) {
+        if (has_try[i] && (LONG)(now - next_try[i]) < 0) continue;
         XINPUT_STATE st;
         ZeroMemory(&st, sizeof(st));
-        if (get_state(i, &st) != ERROR_SUCCESS) continue;
+        if (get_state(i, &st) != ERROR_SUCCESS) {
+            has_try[i] = TRUE;
+            next_try[i] = now + 1000;
+            continue;
+        }
+        has_try[i] = FALSE;
         if (state_has_activity(&st, dead)) {
             g_pad_index = (int)i;
             *out = st;
@@ -414,6 +521,8 @@ static int pick_pad(DWORD (WINAPI *get_state)(DWORD, XINPUT_STATE *),
     }
     return -1;
 }
+
+typedef UINT (WINAPI *TimePeriodFn)(UINT);
 
 static DWORD WINAPI mapper_thread(LPVOID unused) {
     (void)unused;
@@ -428,11 +537,35 @@ static DWORD WINAPI mapper_thread(LPVOID unused) {
         (DWORD (WINAPI *)(DWORD, XINPUT_STATE *))GetProcAddress(xinput, "XInputGetState");
     if (!get_state) { FreeLibrary(xinput); return 0; }
 
+    HMODULE winmm = LoadLibraryW(L"winmm.dll");
+    TimePeriodFn time_begin = winmm ? (TimePeriodFn)GetProcAddress(winmm, "timeBeginPeriod") : NULL;
+    TimePeriodFn time_end   = winmm ? (TimePeriodFn)GetProcAddress(winmm, "timeEndPeriod") : NULL;
+    if (time_begin) time_begin(1);
+
+    LARGE_INTEGER qpf, qpc_last, qpc_now;
+    QueryPerformanceFrequency(&qpf);
+    QueryPerformanceCounter(&qpc_last);
+
     const SHORT dead = (SHORT)((32767 * g_deadzone_pct) / 100);
     float mouse_acc_x = 0.0f, mouse_acc_y = 0.0f;
     g_active_layer = LAYER_BASE;
 
     while (InterlockedCompareExchange(&g_running, 1, 1)) {
+        QueryPerformanceCounter(&qpc_now);
+        float dt_ms = (float)((double)(qpc_now.QuadPart - qpc_last.QuadPart) * 1000.0 / (double)qpf.QuadPart);
+        qpc_last = qpc_now;
+        if (dt_ms < 0.5f) dt_ms = 0.5f;
+        if (dt_ms > 20.0f) dt_ms = 20.0f;
+        g_dt_scale = dt_ms / 4.0f;
+
+        if (g_require_focus && !process_has_focus()) {
+            release_all_layers();
+            g_active_layer = LAYER_BASE;
+            mouse_acc_x = mouse_acc_y = 0.0f;
+            Sleep(20);
+            continue;
+        }
+
         XINPUT_STATE state;
         int pad = pick_pad(get_state, dead, &state);
         if (pad < 0) {
@@ -473,19 +606,23 @@ static DWORD WINAPI mapper_thread(LPVOID unused) {
     }
 
     release_all_layers();
-    FreeLibrary(xinput);
+    if (time_end) time_end(1);
     return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
-    (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         g_module = instance;
         DisableThreadLibraryCalls(instance);
-        HANDLE t = CreateThread(NULL, 0, mapper_thread, NULL, 0, NULL);
-        if (t) CloseHandle(t);
+        g_thread = CreateThread(NULL, 0, mapper_thread, NULL, 0, NULL);
     } else if (reason == DLL_PROCESS_DETACH) {
         InterlockedExchange(&g_running, 0);
+        if (!reserved && g_thread) {
+            WaitForSingleObject(g_thread, 100);
+            CloseHandle(g_thread);
+            g_thread = NULL;
+            release_all_layers();
+        }
     }
     return TRUE;
 }
