@@ -19,6 +19,8 @@ features will be handled as they come up.
 - Multi-key bindings. One button can send several keys at once
 - Two modifier layers. Hold Mod1 or Mod2 to switch to alternate button/stick maps
 - Full keyboard coverage: letters, digits, punctuation, modifiers, arrows, F-keys, numpad
+- Keys are sent as hardware scan codes, so games that read DirectInput, Raw Input or SDL see them
+- Input is only sent while the game is the foreground window
 - No GUI required
 
 ---
@@ -94,12 +96,28 @@ Not required when using a patched EXE. Relative paths resolve from the launcher 
 
 ### `[Controller]`
 
-| Key                | Default | Meaning                                         |
-|--------------------|---------|-------------------------------------------------|
-| `Deadzone`         | `20`    | Stick deadzone % (0–90)                         |
-| `MouseSensitivity` | `10`    | Stick→mouse speed (1–100)                       |
-| `InvertY`          | `false` | Invert vertical mouse axis                      |
-| `TriggerThreshold` | `30`    | 0–255; LT/RT count as pressed at or above this  |
+| Key                | Default | Meaning                                                              |
+|--------------------|---------|----------------------------------------------------------------------|
+| `Deadzone`         | `20`    | Stick deadzone % (0–90)                                              |
+| `MouseSensitivity` | `10`    | Stick→mouse speed (1–100)                                            |
+| `InvertY`          | `false` | Invert vertical mouse axis                                           |
+| `TriggerThreshold` | `30`    | 1–250; LT/RT count as pressed at or above this                       |
+| `ScanCodes`        | `true`  | Send keyboard input as scan codes (see below)                        |
+| `RequireFocus`     | `true`  | Only send input while the game window is in the foreground (see below) |
+
+Boolean values accept `true`, `1`, `yes` or `on` for true. Anything else is false.
+
+**`ScanCodes`**
+
+With `true`, keys are sent the way a physical keyboard sends them. This is what most games need, and games that ignore virtual-key-only input (many SDL, DirectInput and Raw Input titles) will only respond with this on. Set it to `false` to send plain virtual-key events instead, which is only worth trying if a specific game or program misbehaves with scan codes. `PAUSE` and `NUMLOCK` always use the virtual-key path either way.
+
+**`RequireFocus`**
+
+With `true`, nothing is sent while another window is in front, and any held keys are released when focus is lost. This stops the controller from typing into other windows after an alt-tab. The check passes only if the foreground window belongs to the same process as the DLL. If a game uses a launcher or wrapper that owns the visible window, set this to `false`, or no input will be sent. If input is completely dead in a game, try this setting first.
+
+**Mouse speed**
+
+Stick-to-mouse movement is scaled by elapsed time, so `MouseSensitivity` gives the same cursor speed regardless of system timer resolution.
 
 ### `[Modifiers]`
 
@@ -115,6 +133,8 @@ Up to **two** modifier buttons (any button name, or `NONE`):
 | Mod1 only   | `Buttons_Mod1`, `*Stick_Mod1`       |
 | Mod2 only   | `Buttons_Mod2`, `*Stick_Mod2`       |
 | both        | Mod1 wins                           |
+
+A modifier button does not fire its own base binding while it is acting as a modifier. If you want it to send something in a layer, list it explicitly in that layer's section (see below). There is no tap-versus-hold behavior: a modifier button cannot also send a key when pressed alone.
 
 ### `[Buttons]` (base layer)
 
@@ -144,6 +164,14 @@ Works on **base and mod layers**:
 
 Up to 8 codes per binding. Press sends all downs; release sends ups in reverse order.
 
+The comma is the separator, so the comma key itself cannot be written as `,`. Use `COMMA` (for example `A=COMMA` or `A=SHIFT,COMMA`).
+
+### Shared outputs
+
+Several inputs can be bound to the same key or mouse button (for example `A=W` and `DUP=W`). The key stays held until every input using it has been released, so letting go of one does not cut off the other.
+
+Mouse wheel bindings fire once per press, not continuously while held.
+
 ### Modifier layers
 
 Only list **overrides**. Unlisted buttons keep the base binding.
@@ -154,6 +182,11 @@ Only list **overrides**. Unlisted buttons keep the base binding.
 
     [Buttons_Mod2]
     A=C
+
+To disable a base binding inside a layer, set it to `NONE`:
+
+    [Buttons_Mod1]
+    B=NONE
 
 ### Sticks
 
@@ -167,7 +200,10 @@ Only list **overrides**. Unlisted buttons keep the base binding.
     [RightStick]
     Mode=Mouse
 
-Optional per-modifier stick maps (include `Mode=` to activate):
+Optional per-modifier stick maps. A section is active if it contains `Mode=` or at least one direction:
+
+    [LeftStick_Mod1]
+    UP=I
 
     [RightStick_Mod1]
     Mode=Keys
@@ -176,8 +212,13 @@ Optional per-modifier stick maps (include `Mode=` to activate):
     UP=NONE
     DOWN=NONE
 
-While that modifier is held, the stick uses this map (e.g. mouse → keys).
-When released, it returns to the base stick map.
+Like the buttons, only list the directions you want to change. Unlisted directions keep the base stick binding, so the `LeftStick_Mod1` example above changes only UP and leaves `S`, `A` and `D` as they were. Use `NONE` to unbind a direction in that layer. If `Mode=` is left out, the layer keeps the base stick's mode.
+
+While that modifier is held, the stick uses the layer map (e.g. mouse → keys). When released, it returns to the base stick map.
+
+### Switching layers while inputs are held
+
+If a button or stick direction is held when you press or release a modifier, and its binding is the same in both layers, it stays held with no release and re-press. Bindings that differ between the two layers are released and the new layer's binding takes over.
 
 ---
 
@@ -195,21 +236,25 @@ Case-insensitive.
 
 | Character | Names |
 |-----------|--------|
-| `[` `{` | `LBRACKET` `LBRACE` `OPENBRACKET` |
-| `]` `}` | `RBRACKET` `RBRACE` `CLOSEBRACKET` |
-| `\` `\|` | `BACKSLASH` `PIPE` |
-| `;` `:` | `SEMICOLON` `COLON` |
-| `'` `"` | `QUOTE` `APOSTROPHE` |
-| `,` `<` | `COMMA` |
+| `[` `{` | `LBRACKET` `OPENBRACKET` |
+| `]` `}` | `RBRACKET` `CLOSEBRACKET` |
+| `\` `\|` | `BACKSLASH` |
+| `;` `:` | `SEMICOLON` |
+| `'` `"` | `QUOTE` |
+| `,` `<` | `COMMA` (the character `,` itself cannot be used, see above) |
 | `.` `>` | `PERIOD` `DOT` |
-| `/` `?` | `SLASH` `QUESTION` |
-| `` ` `` `~` | `GRAVE` `TILDE` `BACKTICK` |
-| `-` `_` | `MINUS` `DASH` `UNDERSCORE` |
-| `=` `+` | `EQUALS` `PLUS` |
+| `/` `?` | `SLASH` |
+| `` ` `` `~` | `GRAVE` `TILDE` |
+| `-` `_` | `MINUS` `DASH` |
+| `=` `+` | `EQUALS` |
 
-**Named:** `SPACE` `ENTER`/`RETURN` `ESC`/`ESCAPE` `TAB` `SHIFT`/`LSHIFT` `RSHIFT` `CTRL`/`CONTROL`/`LCTRL` `RCTRL` `ALT`/`LALT` `RALT` `BACKSPACE`/`BKSP` `DELETE`/`DEL` `INSERT`/`INS` `HOME` `END` `PGUP`/`PAGEUP` `PGDN`/`PAGEDOWN` `UP` `DOWN` `LEFT` `RIGHT` `CAPSLOCK` `NUMLOCK` `SCROLLLOCK` `PAUSE` `PRINTSCREEN`/`PRTSC` `LWIN` `RWIN` `APPS`/`MENU` `F1`–`F12`
+Punctuation names a **physical key**, not a typed character. The two characters in each row are the same key, and Shift is never added for you. `=` and `+` are identical, and so are `;` and `:`, `a` and `A`, and so on. To get the shifted result, add `SHIFT` yourself, for example `SHIFT,EQUALS`. The characters match the keycaps on a US keyboard layout. On other layouts, `;` `/` `` ` `` `[` `]` `\` and `'` can land on different physical keys.
 
-**Numpad:** `NUMPAD0`–`NUMPAD9` (or `NUM0`–`NUM9`), `NUMPAD*` `NUMPAD+` `NUMPAD-` `NUMPAD.` `NUMPAD/`
+**Named:** `SPACE` `ENTER`/`RETURN` `ESC`/`ESCAPE` `TAB` `SHIFT`/`LSHIFT` `RSHIFT` `CTRL`/`CONTROL`/`LCTRL` `RCTRL` `ALT`/`LALT` `RALT` `BACKSPACE`/`BKSP`/`BACK` `DELETE`/`DEL` `INSERT`/`INS` `HOME` `END` `PGUP`/`PAGEUP` `PGDN`/`PAGEDOWN` `UP` `DOWN` `LEFT` `RIGHT` `CAPSLOCK`/`CAPS` `NUMLOCK` `SCROLLLOCK`/`SCROLL` `PAUSE`/`BREAK` `PRINTSCREEN`/`PRTSC` `LWIN` `RWIN` `APPS`/`MENU` `F1`–`F12`
+
+**Numpad:** `NUMPAD0`–`NUMPAD9` (or `NUM0`–`NUM9`), `NUMPAD*`/`MULTIPLY`, `NUMPAD+`/`ADD`, `NUMPAD-`/`SUBTRACT`, `NUMPAD.`/`DECIMAL`, `NUMPAD/`/`DIVIDE`
+
+An unrecognized name is silently ignored and the binding does nothing, so check spelling if a mapping seems dead.
 
 ---
 
@@ -217,8 +262,27 @@ Case-insensitive.
 
 1. DLL starts a background thread on process attach.
 2. Thread reads `StickBind.ini` beside the DLL.
-3. Polls the first attached XInput controller that sends input (~250 Hz).
+3. Polls the first attached XInput controller that sends input (~250 Hz) and stays on that controller until it disconnects.
 4. Emits `SendInput` key/mouse events on edges; relative mouse for stick→mouse.
+5. Held inputs are released on disconnect, on focus loss (with `RequireFocus`), and when the DLL unloads.
+
+---
+
+## Troubleshooting and limitations
+
+If a game does not respond, work through these in order:
+
+1. Set `RequireFocus=false`, in case a launcher or wrapper owns the foreground window.
+2. Set `ScanCodes=false`, in case the game handles scan codes badly.
+3. Run the game and any launcher at the same privilege level. Windows blocks input injected into an elevated window from a non-elevated process.
+4. Confirm the DLL, `setdll` and the game are all the same architecture (32 or 64-bit).
+
+Known limitations:
+
+- Games with anti-cheat may block or flag injected input and DLLs. Do not use this in online games with anti-cheat.
+- Some games discard input generated by `SendInput`. There is no workaround short of a virtual input driver.
+- If a game also reads the controller natively, it receives both the real controller input and the mapped keyboard/mouse input. Turn off the game's own controller support if prompts or controls conflict.
+- Only XInput controllers are supported.
 
 ---
 
