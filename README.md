@@ -27,7 +27,7 @@ features will be handled as they come up.
 
 ## How the DLL gets into the game
 
-### A. Recommended (for Wine/Proton) — `setdll`
+### A. `setdll` (for Wine/Proton)
 
 Add the mapper to the game EXE import table once. After that the game loads the
 DLL itself; no special launcher is needed.
@@ -41,9 +41,9 @@ To remove later, repeat steps 1 and 2. Instead of `inject`, the option will now 
 
 Architecture of setdll, the DLL, and the game must match.
 
-## Important note: I have just discovered that this method does not work on a real Windows system. At least not reliably. It seems to crash the whole EXE before booting. I am trying to debug the issue, but in the meantime if you are on a real Windows system and not Wine/Proton then use option B.
+## Important note: I have just discovered that this method does not work on a real Windows system. At least not reliably. It seems to crash the whole EXE before booting. I have looked into the issue, but in the meantime if you are on a real Windows system and not Wine/Proton then use option B. (I have no running Windows system to further debug the issue, and have not used Windows since the 7 days, so unless someone else tracks down this issue it probably won't get fixed by me).
 
-### B. Optional fallback — launcher injection
+### B. Launcher injection (for Windows)
 
 Use when you do not want to modify the game EXE.
 
